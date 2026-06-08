@@ -1,0 +1,281 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+
+class GameEngine
+{
+    private const int WIDTH = 80;  
+    private const int PLAY_HEIGHT = 28;  
+    private const int HEADER_ROWS = 8; 
+    private int TopBoundary => HEADER_ROWS;              // row where top wall sits
+    private int BottomBoundary => HEADER_ROWS + PLAY_HEIGHT;// row where bottom wall sits
+    private int _score = 0;
+    private bool _isRunning = true;
+    private string _playerName = "Player";   // set before game starts
+
+    private Car _player;
+    private List<Obstacle> _obstacles = new List<Obstacle>();
+    private Random _rnd = new Random();
+    private Stopwatch _timer = new Stopwatch();
+    private DatabaseHelper _db = new DatabaseHelper();
+    private char[] _shapes = { '#', '*', 'O', '@', 'X', '%', '~', '!' };
+    private ConsoleColor[] _colors =
+    {
+        ConsoleColor.Red, ConsoleColor.Yellow, ConsoleColor.Magenta,
+        ConsoleColor.Green, ConsoleColor.White, ConsoleColor.DarkYellow
+    };
+    public int Score => _score;
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  PUBLIC ENTRY POINT
+    // ════════════════════════════════════════════════════════════════════════
+    public void StartGame(string playerName)
+    {
+        // Store the name so EndGame can save it to DB
+        _playerName = playerName;
+
+        // Reset state each new game
+        _score = 0;
+        _isRunning = true;
+        _obstacles.Clear();
+
+        Console.CursorVisible = false;
+        try { Console.SetWindowSize(WIDTH + 6, HEADER_ROWS + PLAY_HEIGHT + 6); } catch { }
+        Console.Clear();
+
+        // Ensure the DB table is ready before the game starts
+        _db.EnsureTableExists();
+
+        DrawHeader();       // big ASCII art title
+        DrawBoundary();     // the box walls
+
+        // Place player car near bottom-center of play area
+        _player = new Car(WIDTH / 2 - 3, BottomBoundary - 4);
+
+        _timer.Restart();   // start the clock
+
+        // ── MAIN GAME LOOP ──────────────────────────────────────────────────
+        // Runs ~28 times per second (Thread.Sleep(35) ≈ 35ms per frame)
+        while (_isRunning)
+        {
+            HandleInput();      // read keyboard
+            SpawnObstacles();   // maybe add a new obstacle
+            MoveObstacles();    // move all obstacles down one row
+            Draw();             // redraw player + obstacles + HUD
+            Thread.Sleep(35);   // pause 35ms → ~28 FPS
+        }
+
+        EndGame();
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  DRAW HEADER — big colorful ASCII art title at top of screen
+    // ════════════════════════════════════════════════════════════════════════
+    private void DrawHeader()
+    {
+        // Line 0: decorative border
+        Console.ForegroundColor = ConsoleColor.DarkCyan;
+        Console.SetCursorPosition(0, 0);
+        Console.Write("  " + new string('*', 76));
+
+        // Lines 1-6: ASCII block-letter art "CAR GAME"
+        string[] art = {
+            @"  ██████╗ █████╗ ██████╗      ██████╗  █████╗ ███╗   ███╗███████╗",
+            @"  ██╔════╝██╔══██╗██╔══██╗    ██╔════╝ ██╔══██╗████╗ ████║██╔════╝",
+            @"  ██║     ███████║██████╔╝    ██║  ███╗███████║██╔████╔██║█████╗  ",
+            @"  ██║     ██╔══██║██╔══██╗    ██║   ██║██╔══██║██║╚██╔╝██║██╔══╝  ",
+            @"  ╚██████╗██║  ██║██║  ██║    ╚██████╔╝██║  ██║██║ ╚═╝ ██║███████╗",
+            @"   ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝"
+        };
+
+        ConsoleColor[] artColors =
+        {
+            ConsoleColor.Cyan, ConsoleColor.Yellow, ConsoleColor.Green,
+            ConsoleColor.Magenta, ConsoleColor.Yellow, ConsoleColor.Cyan
+        };
+
+        for (int i = 0; i < art.Length; i++)
+        {
+            Console.ForegroundColor = artColors[i];
+            Console.SetCursorPosition(0, i + 1);
+            Console.Write(art[i]);
+        }
+
+        // Line 7: instructions bar
+        Console.ForegroundColor = ConsoleColor.DarkCyan;
+        Console.SetCursorPosition(0, 7);
+        Console.Write("  " + new string('*', 76));
+
+        Console.ForegroundColor = ConsoleColor.Gray;
+        Console.SetCursorPosition(3, 7);
+        Console.Write(" Arrow Keys: Move    Avoid obstacles!    Score increases as obstacles pass ");
+
+        Console.ResetColor();
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  DRAW BOUNDARY — the box walls around the play area
+    // ════════════════════════════════════════════════════════════════════════
+    private void DrawBoundary()
+    {
+        Console.ForegroundColor = ConsoleColor.Gray;
+
+        // Top and bottom horizontal lines
+        for (int col = 1; col < WIDTH; col++)
+        {
+            Console.SetCursorPosition(col, TopBoundary); Console.Write("═");
+            Console.SetCursorPosition(col, BottomBoundary); Console.Write("═");
+        }
+
+        // Left and right vertical lines
+        for (int row = TopBoundary; row <= BottomBoundary; row++)
+        {
+            Console.SetCursorPosition(1, row); Console.Write("║");
+            Console.SetCursorPosition(WIDTH, row); Console.Write("║");
+        }
+
+        Console.ResetColor();
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  HANDLE INPUT — reads a key if one is waiting
+    // ════════════════════════════════════════════════════════════════════════
+    private void HandleInput()
+    {
+        if (Console.KeyAvailable)
+        {
+            ConsoleKeyInfo key = Console.ReadKey(true);   // 'true' = don't echo key to screen
+            _player.Clear();                              // erase old position
+            _player.Move(key.Key, WIDTH, BottomBoundary, TopBoundary); // update position
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  SPAWN OBSTACLES — 15% chance each frame to add a new one
+    // ════════════════════════════════════════════════════════════════════════
+    private void SpawnObstacles()
+    {
+        if (_rnd.Next(0, 100) < 15)  // 15 out of 100 = 15% chance
+        {
+            int rx = _rnd.Next(2, WIDTH - 2);
+            char rs = _shapes[_rnd.Next(_shapes.Length)];
+            ConsoleColor rc = _colors[_rnd.Next(_colors.Length)];
+
+            // New obstacle starts at the TOP of the play area
+            _obstacles.Add(new Obstacle(rx, TopBoundary + 1, rs, rc));
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  MOVE OBSTACLES — shift every obstacle down, check collision + scoring
+    // ════════════════════════════════════════════════════════════════════════
+    private void MoveObstacles()
+    {
+        // Loop backwards so we can safely remove items while iterating
+        for (int i = _obstacles.Count - 1; i >= 0; i--)
+        {
+            _obstacles[i].Clear();       // erase from old row
+            _obstacles[i].MoveDown();    // move to next row
+
+            // COLLISION CHECK: did this obstacle hit the player car?
+            if (_player.CollidesWith(_obstacles[i]))
+            {
+                _isRunning = false;      // stop the game loop
+                return;
+            }
+
+            // SCORING: obstacle fell past the bottom boundary without hitting player
+            if (_obstacles[i].IsOffScreen(BottomBoundary))
+            {
+                int ox = _obstacles[i].X;   // save x position before removing
+                _obstacles.RemoveAt(i);
+                _score++;
+
+                // FIX 2: Redraw the bottom wall character that the obstacle may have
+                // overwritten when it reached the boundary row
+                Console.ForegroundColor = ConsoleColor.Gray;
+                Console.SetCursorPosition(ox, BottomBoundary);
+                Console.Write("═");
+                Console.ResetColor();
+            }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  DRAW — redraw HUD + all game objects every frame
+    //  POLYMORPHISM IN ACTION: _player.Draw() and obs.Draw() call different
+    //  versions of Draw() even though both objects come from GameObject.
+    // ════════════════════════════════════════════════════════════════════════
+    private void Draw()
+    {
+        // Format elapsed time as MM:SS
+        string timeStr = string.Format("{0:00}:{1:00}",
+            (int)_timer.Elapsed.TotalMinutes,
+            _timer.Elapsed.Seconds);
+
+        // HUD bar above the boundary
+        Console.ForegroundColor = ConsoleColor.White;
+        Console.SetCursorPosition(WIDTH / 2 - 12, TopBoundary - 1);
+        Console.Write($"  SCORE: {_score,-5} | TIME: {timeStr}  ");
+
+        // Draw player car (Car.Draw() runs — Cyan [=O=])
+        _player.Draw();
+
+        // Draw each obstacle (Obstacle.Draw() runs — colored symbol)
+        // POLYMORPHISM: same Draw() call, different behaviour per object type
+        foreach (Obstacle obs in _obstacles)
+            obs.Draw();
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  END GAME — save score to DB, show confirmation
+    // ════════════════════════════════════════════════════════════════════════
+    private void EndGame()
+    {
+        _timer.Stop();
+
+        string finalTime = string.Format("{0:00}:{1:00}",
+            (int)_timer.Elapsed.TotalMinutes,
+            _timer.Elapsed.Seconds);
+
+        Console.Beep(400, 300);   // short beep on crash
+
+        // Build the record (Tier 2 model) and hand it to the DB layer (Tier 3)
+        ScoreRecord record = new ScoreRecord(_playerName, _score, finalTime);
+        bool saved = _db.SaveScore(record);       // Tier 3 handles SQL
+
+        // Show save result in the middle of the play area
+        int midRow = TopBoundary + PLAY_HEIGHT / 2;
+        Console.ForegroundColor = saved ? ConsoleColor.Green : ConsoleColor.Red;
+        Console.SetCursorPosition(WIDTH / 2 - 14, midRow + 1);
+        Console.Write(saved ? " Score saved to database! " : " Could not save to database. ");
+
+        // Show top 5 scores from DB
+        ShowLeaderboard(midRow + 3);
+
+        Thread.Sleep(1500);   // short pause before returning to Program.cs
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  SHOW LEADERBOARD — reads top scores from DB and displays them
+    // ════════════════════════════════════════════════════════════════════════
+    private void ShowLeaderboard(int startRow)
+    {
+        List<ScoreRecord> top = _db.GetTopScores(5);   // Tier 3 query
+        if (top.Count == 0) return;
+
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.SetCursorPosition(WIDTH / 2 - 10, startRow);
+        Console.Write("  ── TOP SCORES ──");
+
+        for (int i = 0; i < top.Count; i++)
+        {
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.SetCursorPosition(WIDTH / 2 - 14, startRow + i + 1);
+            Console.Write($"  {i + 1}. {top[i].PlayerName,-12} Score: {top[i].Score,-5} Time: {top[i].TimeSurvived}");
+        }
+
+        Console.ResetColor();
+    }
+}
