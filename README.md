@@ -1,4 +1,4 @@
-# 🚗 Console Car Game — C# OOP Project
+# 🚗 Console Car Game — C# OOP Project Muhammaad Abdullah (2025-GA-63)
 
 A console-based car racing game built in **C#** using a **3-Tier Architecture** and full **Object-Oriented Programming** principles. The game tracks player scores and stores them in a **MySQL database**, making it a complete end-to-end academic project.
 
